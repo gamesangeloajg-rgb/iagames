@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdir, writeFile, readdir } from "node:fs/promises";\nimport { randomUUID } from "node:crypto";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -81,10 +81,94 @@ async function planProject(prompt) {
   return { status: 200, body: { plan: validatePlan(parseModelJson(content), type) } };
 }
 
-const server = createServer(async (req, res) => {
+
+const DATA_DIR = join(ROOT, ".iagames-data", "projects");
+const ALLOWED_FILES = new Set(["index.html", "style.css", "script.js"]);
+async function generateProject(prompt) {
+  const key = process.env.AI_API_KEY;
+  if (!key || !process.env.AI_MODEL) return { status: 503, body: { error: "AI_NOT_CONFIGURED", message: "Configure AI_API_KEY e AI_MODEL no servidor antes de gerar projetos." } };
+  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\\/+$/, "");
+  const system = [
+    "Você é o agente construtor do IA Games. Gere um pequeno projeto web funcional com HTML, CSS e JavaScript puro.",
+    "Retorne SOMENTE JSON válido com title, type (game ou app) e files (array de objetos path/content).",
+    "Os únicos caminhos permitidos são index.html, style.css e script.js. Sempre inclua index.html e referencie os outros arquivos nele com caminhos relativos.",
+    "Não use bibliotecas externas, CDNs, fontes remotas, chamadas de rede, armazenamento de credenciais ou APIs externas. Não inclua iframes, formulários que enviem dados, downloads automáticos ou acesso ao sistema de arquivos.",
+    "O resultado deve ser uma demonstração frontend autossuficiente, responsiva e interativa, em português. Não inclua instruções para contornar sandbox.",
+    "Limite a 3 arquivos e 60 KB de conteúdo total. Não inclua markdown."
+  ].join(" ");
+  const response = await fetch(base + "/chat/completions", {
+    method: "POST",
+    headers: { authorization: "Bearer " + key, "content-type": "application/json" },
+    body: JSON.stringify({ model: process.env.AI_MODEL, temperature: 0.4, response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content: "Crie o projeto a partir deste briefing:\\n" + prompt }] }),
+    signal: AbortSignal.timeout(60000)
+  });
+  if (!response.ok) return { status: 502, body: { error: "AI_GENERATION_FAILED", message: "O provedor não conseguiu gerar os arquivos (HTTP " + response.status + ")." } };
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== "string") throw new Error("Resposta vazia do provedor.");
+  const generated = parseModelJson(content);
+  const title = typeof generated.title === "string" ? generated.title.trim().slice(0, 90) : "Projeto IA Games";
+  const type = generated.type === "game" ? "game" : "app";
+  if (!Array.isArray(generated.files)) throw new Error("O modelo não retornou a lista de arquivos.");
+  const seen = new Set();
+  const files = [];
+  let total = 0;
+  for (const item of generated.files) {
+    if (!item || !ALLOWED_FILES.has(item.path) || seen.has(item.path) || typeof item.content !== "string") continue;
+    const size = Buffer.byteLength(item.content, "utf8");
+    total += size;
+    if (size > 40000 || total > 60000) throw new Error("Os arquivos gerados excederam o limite permitido.");
+    seen.add(item.path);
+    files.push({ path: item.path, content: item.content });
+  }
+  if (!seen.has("index.html") || !files.length) throw new Error("O projeto precisa conter um index.html válido.");
+  return { status: 200, body: { title, type, files } };
+}
+async function saveProject(project) {
+  const id = randomUUID();
+  const directory = join(DATA_DIR, id);
+  await mkdir(directory, { recursive: true });
+  for (const file of project.files) await writeFile(join(directory, file.path), file.content, { encoding: "utf8", flag: "wx" });
+  const metadata = { id, title: project.title, type: project.type, createdAt: new Date().toISOString(), files: project.files.map(file => file.path) };
+  await writeFile(join(directory, "project.json"), JSON.stringify(metadata, null, 2), { encoding: "utf8", flag: "wx" });
+  return { ...metadata, content: project.files };
+}
+async function listProjects() {
+  await mkdir(DATA_DIR, { recursive: true });
+  const entries = await readdir(DATA_DIR, { withFileTypes: true });
+  const projects = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || !/^[0-9a-f-]{36}$/i.test(entry.name)) continue;
+    try {
+      const metadata = JSON.parse(await readFile(join(DATA_DIR, entry.name, "project.json"), "utf8"));
+      projects.push({ id: metadata.id, title: metadata.title, type: metadata.type, createdAt: metadata.createdAt, files: metadata.files });
+    } catch { /* Ignore incomplete/corrupt project folders. */ }
+  }
+  return projects.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+\nconst server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
   if (req.method === "GET" && url.pathname === "/api/health") {
     return json(res, 200, { ok: true, aiConfigured: Boolean(process.env.AI_API_KEY && process.env.AI_MODEL) });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/projects") {
+    try { return json(res, 200, { projects: await listProjects() }); }
+    catch { return json(res, 500, { error: "PROJECT_LIST_FAILED", message: "Não foi possível carregar os projetos." }); }
+  }
+  if (req.method === "POST" && url.pathname === "/api/projects/create") {
+    try {
+      const body = await bodyJson(req);
+      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      if (prompt.length < 8 || prompt.length > 5000) return json(res, 400, { error: "INVALID_PROMPT", message: "O briefing deve ter entre 8 e 5.000 caracteres." });
+      const generated = await generateProject(prompt);
+      if (generated.status !== 200) return json(res, generated.status, generated.body);
+      const project = await saveProject(generated.body);
+      return json(res, 201, { project });
+    } catch (error) {
+      if (error.name === "TimeoutError" || error.name === "AbortError") return json(res, 504, { error: "AI_TIMEOUT", message: "A geração demorou demais. Tente novamente." });
+      return json(res, 502, { error: "PROJECT_CREATE_FAILED", message: "Não foi possível criar o projeto: " + error.message });
+    }
   }
   if (req.method === "POST" && url.pathname === "/api/projects/plan") {
     try {
