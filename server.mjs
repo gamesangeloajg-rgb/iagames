@@ -160,10 +160,120 @@ async function listProjects() {
   }
   return projects.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
-\nconst server = createServer(async (req, res) => {
+
+
+async function generateModification(project, prompt) {
+  if (!process.env.AI_API_KEY || !process.env.AI_MODEL) return { status: 503, body: { error: "AI_NOT_CONFIGURED", message: "Configure AI_API_KEY e AI_MODEL no servidor." } };
+  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\\/+$/, "");
+  const system = [
+    "Você é o agente de manutenção do IA Games. Modifique o projeto web existente conforme o pedido.",
+    "Retorne SOMENTE JSON válido com title, type (game ou app) e files (array de objetos path/content).",
+    "Retorne o conjunto COMPLETO de arquivos finais. Os únicos caminhos permitidos são index.html, style.css e script.js. Preserve funcionalidades não mencionadas.",
+    "Não use bibliotecas externas, CDNs, rede, iframes, formulários que enviem dados ou acesso ao sistema de arquivos.",
+    "Mantenha o projeto autossuficiente, responsivo e em português. Limite total 60 KB. Não inclua markdown."
+  ].join(" ");
+  const response = await fetch(base + "/chat/completions", {
+    method: "POST",
+    headers: { authorization: "Bearer " + process.env.AI_API_KEY, "content-type": "application/json" },
+    body: JSON.stringify({ model: process.env.AI_MODEL, temperature: 0.25, response_format: { type: "json_object" }, messages: [
+      { role: "system", content: system },
+      { role: "user", content: "Pedido de alteração:\\n" + prompt + "\\n\\nProjeto atual:\\n" + JSON.stringify({ title: project.title, type: project.type, files: project.content }) }
+    ] }),
+    signal: AbortSignal.timeout(60000)
+  });
+  if (!response.ok) return { status: 502, body: { error: "AI_MODIFICATION_FAILED", message: "O provedor não conseguiu modificar o projeto (HTTP " + response.status + ")." } };
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  if (typeof content !== "string") throw new Error("Resposta vazia do provedor.");
+  const generated = parseModelJson(content);
+  if (!Array.isArray(generated.files)) throw new Error("O modelo não retornou os arquivos finais.");
+  const seen = new Set(), files = [];
+  let total = 0;
+  for (const item of generated.files) {
+    if (!item || !ALLOWED_FILES.has(item.path) || seen.has(item.path) || typeof item.content !== "string") continue;
+    const size = Buffer.byteLength(item.content, "utf8");
+    total += size;
+    if (size > 40000 || total > 60000) throw new Error("Os arquivos modificados excederam o limite permitido.");
+    seen.add(item.path); files.push({ path: item.path, content: item.content });
+  }
+  if (!seen.has("index.html") || !files.length) throw new Error("A alteração precisa retornar um index.html válido.");
+  return { status: 200, body: { title: typeof generated.title === "string" ? generated.title.trim().slice(0,90) : project.title, type: generated.type === "game" ? "game" : "app", files } };
+}
+async function readVersion(projectId, versionId) {
+  if (!/^[0-9a-f-]{36}$/i.test(projectId) || !/^v[0-9]+-[0-9a-f]{8}$/i.test(versionId)) return null;
+  try { return JSON.parse(await readFile(join(DATA_DIR, projectId, "versions", versionId + ".json"), "utf8")); }
+  catch { return null; }
+}
+async function createSnapshot(project) {
+  const directory = join(DATA_DIR, project.id, "versions");
+  await mkdir(directory, { recursive: true });
+  const files = [];
+  for (const path of project.files) if (ALLOWED_FILES.has(path)) files.push({ path, content: await readFile(join(DATA_DIR, project.id, path), "utf8") });
+  const versionId = "v" + Date.now() + "-" + randomUUID().slice(0,8);
+  const snapshot = { versionId, title: project.title, type: project.type, createdAt: new Date().toISOString(), files };
+  await writeFile(join(directory, versionId + ".json"), JSON.stringify(snapshot), { flag: "wx" });
+  return { versionId, createdAt: snapshot.createdAt };
+}
+async function applyProjectFiles(projectId, files) {
+  const directory = join(DATA_DIR, projectId);
+  for (const file of files) {
+    const temporary = join(directory, "." + file.path + "." + randomUUID() + ".tmp");
+    await writeFile(temporary, file.content, { encoding: "utf8", flag: "wx" });
+    await (await import("node:fs/promises")).rename(temporary, join(directory, file.path));
+  }
+}
+
+const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
   if (req.method === "GET" && url.pathname === "/api/health") {
     return json(res, 200, { ok: true, aiConfigured: Boolean(process.env.AI_API_KEY && process.env.AI_MODEL) });
+  }
+
+
+  const projectAction = url.pathname.match(/^\\/api\\/projects\\/([0-9a-f-]{36})\\/(modify|versions|rollback)$/i);
+  if (projectAction && req.method === "GET" && projectAction[2] === "versions") {
+    const project = await getProject(projectAction[1]);
+    if (!project) return json(res, 404, { error: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
+    const versions = Array.isArray(project.versions) ? project.versions : [];
+    return json(res, 200, { versions });
+  }
+  if (projectAction && req.method === "POST" && projectAction[2] === "modify") {
+    try {
+      const project = await getProject(projectAction[1]);
+      if (!project) return json(res, 404, { error: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
+      const body = await bodyJson(req);
+      const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+      if (prompt.length < 8 || prompt.length > 5000) return json(res, 400, { error: "INVALID_PROMPT", message: "A alteração deve ter entre 8 e 5.000 caracteres." });
+      const changed = await generateModification(project, prompt);
+      if (changed.status !== 200) return json(res, changed.status, changed.body);
+      const directory = join(DATA_DIR, project.id);
+      const metadata = JSON.parse(await readFile(join(directory, "project.json"), "utf8"));
+      const snapshot = await createSnapshot(metadata);
+      await applyProjectFiles(project.id, changed.body.files);
+      const nextFiles = changed.body.files.map(file => file.path);
+      const updated = { ...metadata, title: changed.body.title, type: changed.body.type, files: nextFiles, updatedAt: new Date().toISOString(), versions: [...(metadata.versions || []), snapshot] };
+      await writeFile(join(directory, "project.json"), JSON.stringify(updated, null, 2));
+      return json(res, 200, { project: await getProject(project.id), version: snapshot });
+    } catch (error) {
+      if (error.name === "TimeoutError" || error.name === "AbortError") return json(res, 504, { error: "AI_TIMEOUT", message: "A alteração demorou demais. Tente novamente." });
+      return json(res, 502, { error: "PROJECT_MODIFY_FAILED", message: "Não foi possível modificar o projeto: " + error.message });
+    }
+  }
+  if (projectAction && req.method === "POST" && projectAction[2] === "rollback") {
+    try {
+      const project = await getProject(projectAction[1]);
+      if (!project) return json(res, 404, { error: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
+      const body = await bodyJson(req);
+      const version = await readVersion(project.id, typeof body.versionId === "string" ? body.versionId : "");
+      if (!version) return json(res, 404, { error: "VERSION_NOT_FOUND", message: "Versão não encontrada." });
+      const directory = join(DATA_DIR, project.id);
+      const metadata = JSON.parse(await readFile(join(directory, "project.json"), "utf8"));
+      const snapshot = await createSnapshot(metadata);
+      await applyProjectFiles(project.id, version.files);
+      const updated = { ...metadata, title: version.title, type: version.type, files: version.files.map(file => file.path), updatedAt: new Date().toISOString(), versions: [...(metadata.versions || []), snapshot] };
+      await writeFile(join(directory, "project.json"), JSON.stringify(updated, null, 2));
+      return json(res, 200, { project: await getProject(project.id), version: snapshot });
+    } catch (error) { return json(res, 500, { error: "ROLLBACK_FAILED", message: "Não foi possível restaurar a versão." }); }
   }
 
   const projectMatch = url.pathname.match(/^\/api\/projects\/([0-9a-f-]{36})$/i);
