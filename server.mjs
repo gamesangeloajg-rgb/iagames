@@ -1,6 +1,7 @@
 import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
-import { readFile, mkdir, writeFile, readdir } from "node:fs/promises";\nimport { randomUUID } from "node:crypto";
+import { readFile, mkdir, writeFile, readdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
