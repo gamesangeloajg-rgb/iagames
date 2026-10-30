@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { readFile, mkdir, writeFile, readdir } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { extname, join, resolve, sep } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = fileURLToPath(new URL(".", import.meta.url));
@@ -88,7 +88,7 @@ const ALLOWED_FILES = new Set(["index.html", "style.css", "script.js"]);
 async function generateProject(prompt) {
   const key = process.env.AI_API_KEY;
   if (!key || !process.env.AI_MODEL) return { status: 503, body: { error: "AI_NOT_CONFIGURED", message: "Configure AI_API_KEY e AI_MODEL no servidor antes de gerar projetos." } };
-  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\\/+$/, "");
+  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
   const system = [
     "Você é o agente construtor do IA Games. Gere um pequeno projeto web funcional com HTML, CSS e JavaScript puro.",
     "Retorne SOMENTE JSON válido com title, type (game ou app) e files (array de objetos path/content).",
