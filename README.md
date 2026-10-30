@@ -1,30 +1,27 @@
 # IA Games — Game & App Studio
 
-## Primeira camada do motor de IA
+## Motor de criação (MVP)
 
-Servidor HTTP em Node.js sem dependências externas, endpoint de saúde e planejamento de projetos por um provedor compatível com OpenAI Chat Completions.
+Servidor Node.js sem dependências externas, planejamento por IA, geração de projetos web e persistência local em pastas de projeto.
 
-### Requisitos e execução
+### Executar
 
 - Node.js 20 ou superior.
 - Copie `.env.example` para `.env`.
-- Configure `AI_API_KEY` e `AI_MODEL`. Ajuste `AI_BASE_URL` se usar outro provedor compatível.
+- Configure `AI_API_KEY` e `AI_MODEL`; ajuste `AI_BASE_URL` se necessário.
 - Execute `npm start` e abra http://127.0.0.1:3000.
-- Desenvolvimento: `npm run dev`.
 
-### API
+### Endpoints
 
-- `GET /api/health`: informa se o servidor está ativo e se as credenciais/configuração do modelo existem, sem revelar a chave.
-- `POST /api/projects/plan`: recebe `{"prompt":"Crie um jogo 2D de plataforma."}` e retorna `plan` com título, tipo, resumo, funcionalidades, tecnologias e etapas.
+- `GET /api/health`: estado do servidor e configuração da IA.
+- `POST /api/projects/plan`: cria plano técnico a partir de `{"prompt":"..." }`.
+- `POST /api/projects/create`: gera um projeto frontend real, salva seus arquivos e retorna o conteúdo para preview.
+- `GET /api/projects`: lista os projetos salvos.
 
-### Segurança e limites atuais
+### Geração e isolamento
 
-- Escuta em `127.0.0.1` por padrão; não exponha diretamente à internet.
-- Chaves são lidas no servidor a partir de `.env` ou variáveis de ambiente; `.env` está ignorado pelo Git.
-- Briefings limitados a 5.000 caracteres; corpo HTTP limitado a 64 KB; chamada ao modelo tem timeout.
-- Não persiste briefings, não gera arquivos e não executa código retornado pelo modelo.
-- Antes de uso multiusuário: autenticação, autorização, rate limiting, gestão de segredos e isolamento por projeto.
+A geração aceita somente `index.html`, `style.css` e `script.js`, com até 60 KB no total. Os projetos ficam em `.iagames-data/projects`, fora do Git. O servidor não executa os arquivos gerados. O preview do navegador deve usar iframe com sandbox restrito, sem permissão de mesma origem.
 
-### Próxima etapa
+### Limitações e próximos passos
 
-Persistência de projetos/histórico e geração de arquivos em workspace isolado, com testes automatizados antes de habilitar execução e preview real.
+Esta é uma base de MVP para uso local. Não exponha o servidor diretamente à internet: ainda faltam autenticação, autorização, rate limiting, quotas, isolamento multiusuário e execução em container/VM efêmera. O preview em iframe restrito não substitui isolamento de execução no backend.
