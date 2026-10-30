@@ -71,7 +71,8 @@ function providerConfig(id) {
   const legacy = id === (process.env.AI_PROVIDER || "openai");
   const key = process.env[definition.key] || (legacy ? process.env.AI_API_KEY : "");
   const model = process.env[definition.model] || (legacy ? process.env.AI_MODEL : "") || definition.defaultModel;
-  return key ? { id, label: definition.label, base: definition.base, key, model } : null;
+  const base = legacy && process.env.AI_BASE_URL ? process.env.AI_BASE_URL : definition.base;
+  return key ? { id, label: definition.label, base, key, model } : null;
 }
 function configuredProviders() { return Object.keys(PROVIDERS).map(providerConfig).filter(Boolean); }
 function providerOrder(preferred) {
