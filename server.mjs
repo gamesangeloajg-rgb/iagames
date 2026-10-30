@@ -57,73 +57,70 @@ function validatePlan(input, fallbackType) {
   if (!plan.summary || !plan.features.length || !plan.milestones.length) throw new Error("O plano retornado está incompleto.");
   return plan;
 }
-async function planProject(prompt) {
-  const key = process.env.AI_API_KEY;
-  if (!key) return { status: 503, body: { error: "AI_NOT_CONFIGURED", message: "Servidor ativo, mas AI_API_KEY não está configurada no .env." } };
-  if (!process.env.AI_MODEL) return { status: 503, body: { error: "AI_MODEL_MISSING", message: "Configure AI_MODEL no .env para selecionar o modelo." } };
-  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
+const PROVIDERS = {
+  openai: { label: "OpenAI", base: "https://api.openai.com/v1", key: "OPENAI_API_KEY", model: "OPENAI_MODEL", defaultModel: "gpt-4.1-mini" },
+  groq: { label: "Groq", base: "https://api.groq.com/openai/v1", key: "GROQ_API_KEY", model: "GROQ_MODEL", defaultModel: "llama-3.3-70b-versatile" },
+  openrouter: { label: "OpenRouter", base: "https://openrouter.ai/api/v1", key: "OPENROUTER_API_KEY", model: "OPENROUTER_MODEL", defaultModel: "openai/gpt-4.1-mini" },
+  together: { label: "Together AI", base: "https://api.together.xyz/v1", key: "TOGETHER_API_KEY", model: "TOGETHER_MODEL", defaultModel: "meta-llama/Llama-3.3-70B-Instruct-Turbo" },
+  gemini: { label: "Google Gemini", base: "https://generativelanguage.googleapis.com/v1beta/openai", key: "GEMINI_API_KEY", model: "GEMINI_MODEL", defaultModel: "gemini-2.5-flash" },
+  deepseek: { label: "DeepSeek", base: "https://api.deepseek.com/v1", key: "DEEPSEEK_API_KEY", model: "DEEPSEEK_MODEL", defaultModel: "deepseek-chat" }
+};
+function providerConfig(id) {
+  const definition = PROVIDERS[id];
+  if (!definition) return null;
+  const legacy = id === (process.env.AI_PROVIDER || "openai");
+  const key = process.env[definition.key] || (legacy ? process.env.AI_API_KEY : "");
+  const model = process.env[definition.model] || (legacy ? process.env.AI_MODEL : "") || definition.defaultModel;
+  return key ? { id, label: definition.label, base: definition.base, key, model } : null;
+}
+function configuredProviders() { return Object.keys(PROVIDERS).map(providerConfig).filter(Boolean); }
+function providerOrder(preferred) {
+  const ids = configuredProviders().map(provider => provider.id);
+  const primary = preferred || process.env.AI_PROVIDER || "openai";
+  const fallback = (process.env.AI_FALLBACK_PROVIDERS || "groq,openrouter,together,gemini,deepseek").split(",").map(value => value.trim()).filter(Boolean);
+  return [primary, ...fallback, ...ids].filter((id, index, all) => ids.includes(id) && all.indexOf(id) === index);
+}
+async function callAI(messages, options = {}, preferredProvider) {
+  const order = providerOrder(preferredProvider);
+  if (!order.length) return { error: { status: 503, code: "AI_NOT_CONFIGURED", message: "Configure ao menos uma chave de provedor no .env. Consulte .env.example." } };
+  const failures = [];
+  for (const id of order) {
+    const provider = providerConfig(id);
+    try {
+      const response = await fetch(provider.base.replace(/\/+$/, "") + "/chat/completions", {
+        method: "POST",
+        headers: { authorization: "Bearer " + provider.key, "content-type": "application/json", ...(id === "openrouter" ? { "HTTP-Referer": "https://iagames.local", "X-Title": "IA Games Studio" } : {}) },
+        body: JSON.stringify({ model: provider.model, temperature: options.temperature ?? 0.3, response_format: { type: "json_object" }, messages }),
+        signal: AbortSignal.timeout(options.timeout ?? 60000)
+      });
+      if (!response.ok) { failures.push({ provider: id, status: response.status }); continue; }
+      const data = await response.json(), content = data?.choices?.[0]?.message?.content;
+      if (typeof content !== "string" || !content.trim()) { failures.push({ provider: id, status: "empty_response" }); continue; }
+      return { content, provider: { id, label: provider.label, model: provider.model }, failures };
+    } catch (error) { failures.push({ provider: id, status: error.name === "TimeoutError" || error.name === "AbortError" ? "timeout" : "network_error" }); }
+  }
+  return { error: { status: 502, code: "AI_PROVIDERS_UNAVAILABLE", message: "Nenhum provedor configurado conseguiu responder. Verifique chaves, modelos, cotas e disponibilidade.", failures } };
+}
+async function planProject(prompt, preferredProvider) {
   const type = guessType(prompt);
   const system = "Você é o agente de planejamento do IA Games. Analise o briefing e retorne SOMENTE JSON válido, sem markdown, com title (string), type (game ou app), summary (string em português), features (array de strings), techStack (array de strings), milestones (array de strings). Identifique automaticamente jogo ou aplicativo. Sugira no máximo 8 funcionalidades, 6 tecnologias e 8 etapas. Não diga que código foi gerado ou executado. Nunca solicite nem revele segredos.";
-  const response = await fetch(base + "/chat/completions", {
-    method: "POST",
-    headers: { authorization: "Bearer " + key, "content-type": "application/json" },
-    body: JSON.stringify({ model: process.env.AI_MODEL, temperature: 0.3, response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content: "Briefing do usuário:\n" + prompt }] }),
-    signal: AbortSignal.timeout(45000)
-  });
-  if (!response.ok) {
-    const status = response.status;
-    if (status === 401 || status === 403) return { status: 502, body: { error: "AI_AUTH_FAILED", message: "O provedor recusou a autenticação. Confira a chave e as permissões." } };
-    if (status === 429) return { status: 502, body: { error: "AI_RATE_LIMIT", message: "O provedor limitou temporariamente as solicitações. Tente novamente mais tarde." } };
-    return { status: 502, body: { error: "AI_PROVIDER_ERROR", message: "O provedor de IA retornou HTTP " + status + "." } };
-  }
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new Error("Resposta vazia do provedor.");
-  return { status: 200, body: { plan: validatePlan(parseModelJson(content), type) } };
+  const result = await callAI([{ role: "system", content: system }, { role: "user", content: "Briefing do usuário:\n" + prompt }], { temperature: 0.3, timeout: 45000 }, preferredProvider);
+  if (result.error) return { status: result.error.status, body: { error: result.error.code, message: result.error.message, failures: result.error.failures } };
+  return { status: 200, body: { plan: validatePlan(parseModelJson(result.content), type), provider: result.provider, fallbackAttempts: result.failures } };
 }
-
 
 const DATA_DIR = join(ROOT, ".iagames-data", "projects");
 const ALLOWED_FILES = new Set(["index.html", "style.css", "script.js"]);
-async function generateProject(prompt) {
-  const key = process.env.AI_API_KEY;
-  if (!key || !process.env.AI_MODEL) return { status: 503, body: { error: "AI_NOT_CONFIGURED", message: "Configure AI_API_KEY e AI_MODEL no servidor antes de gerar projetos." } };
-  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const system = [
-    "Você é o agente construtor do IA Games. Gere um pequeno projeto web funcional com HTML, CSS e JavaScript puro.",
-    "Retorne SOMENTE JSON válido com title, type (game ou app) e files (array de objetos path/content).",
-    "Os únicos caminhos permitidos são index.html, style.css e script.js. Sempre inclua index.html e referencie os outros arquivos nele com caminhos relativos.",
-    "Não use bibliotecas externas, CDNs, fontes remotas, chamadas de rede, armazenamento de credenciais ou APIs externas. Não inclua iframes, formulários que enviem dados, downloads automáticos ou acesso ao sistema de arquivos.",
-    "O resultado deve ser uma demonstração frontend autossuficiente, responsiva e interativa, em português. Não inclua instruções para contornar sandbox.",
-    "Limite a 3 arquivos e 60 KB de conteúdo total. Não inclua markdown."
-  ].join(" ");
-  const response = await fetch(base + "/chat/completions", {
-    method: "POST",
-    headers: { authorization: "Bearer " + key, "content-type": "application/json" },
-    body: JSON.stringify({ model: process.env.AI_MODEL, temperature: 0.4, response_format: { type: "json_object" }, messages: [{ role: "system", content: system }, { role: "user", content: "Crie o projeto a partir deste briefing:\\n" + prompt }] }),
-    signal: AbortSignal.timeout(60000)
-  });
-  if (!response.ok) return { status: 502, body: { error: "AI_GENERATION_FAILED", message: "O provedor não conseguiu gerar os arquivos (HTTP " + response.status + ")." } };
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new Error("Resposta vazia do provedor.");
-  const generated = parseModelJson(content);
-  const title = typeof generated.title === "string" ? generated.title.trim().slice(0, 90) : "Projeto IA Games";
-  const type = generated.type === "game" ? "game" : "app";
+async function generateProject(prompt, preferredProvider) {
+  const system = ["Você é o agente construtor do IA Games. Gere um pequeno projeto web funcional com HTML, CSS e JavaScript puro.","Retorne SOMENTE JSON válido com title, type (game ou app) e files (array de objetos path/content).","Os únicos caminhos permitidos são index.html, style.css e script.js. Sempre inclua index.html e referencie os outros arquivos nele com caminhos relativos.","Não use bibliotecas externas, CDNs, fontes remotas, chamadas de rede, armazenamento de credenciais ou APIs externas. Não inclua iframes, formulários que enviem dados, downloads automáticos ou acesso ao sistema de arquivos.","O resultado deve ser uma demonstração frontend autossuficiente, responsiva e interativa, em português. Não inclua instruções para contornar sandbox.","Limite a 3 arquivos e 60 KB de conteúdo total. Não inclua markdown."].join(" ");
+  const result = await callAI([{ role: "system", content: system }, { role: "user", content: "Crie o projeto a partir deste briefing:\n" + prompt }], { temperature: 0.4, timeout: 60000 }, preferredProvider);
+  if (result.error) return { status: result.error.status, body: { error: result.error.code, message: result.error.message, failures: result.error.failures } };
+  const generated = parseModelJson(result.content), title = typeof generated.title === "string" ? generated.title.trim().slice(0,90) : "Projeto IA Games", type = generated.type === "game" ? "game" : "app";
   if (!Array.isArray(generated.files)) throw new Error("O modelo não retornou a lista de arquivos.");
-  const seen = new Set();
-  const files = [];
-  let total = 0;
-  for (const item of generated.files) {
-    if (!item || !ALLOWED_FILES.has(item.path) || seen.has(item.path) || typeof item.content !== "string") continue;
-    const size = Buffer.byteLength(item.content, "utf8");
-    total += size;
-    if (size > 40000 || total > 60000) throw new Error("Os arquivos gerados excederam o limite permitido.");
-    seen.add(item.path);
-    files.push({ path: item.path, content: item.content });
-  }
-  if (!seen.has("index.html") || !files.length) throw new Error("O projeto precisa conter um index.html válido.");
-  return { status: 200, body: { title, type, files } };
+  const seen = new Set(), files = []; let total = 0;
+  for (const item of generated.files) { if (!item || !ALLOWED_FILES.has(item.path) || seen.has(item.path) || typeof item.content !== "string") continue; const size = Buffer.byteLength(item.content,"utf8"); total += size; if(size>40000||total>60000)throw new Error("Os arquivos gerados excederam o limite permitido."); seen.add(item.path); files.push({path:item.path,content:item.content}); }
+  if(!seen.has("index.html")||!files.length)throw new Error("O projeto precisa conter um index.html válido.");
+  return { status:200, body:{title,type,files,provider:result.provider,fallbackAttempts:result.failures} };
 }
 async function saveProject(project) {
   const id = randomUUID();
@@ -162,42 +159,15 @@ async function listProjects() {
 }
 
 
-async function generateModification(project, prompt) {
-  if (!process.env.AI_API_KEY || !process.env.AI_MODEL) return { status: 503, body: { error: "AI_NOT_CONFIGURED", message: "Configure AI_API_KEY e AI_MODEL no servidor." } };
-  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
-  const system = [
-    "Você é o agente de manutenção do IA Games. Modifique o projeto web existente conforme o pedido.",
-    "Retorne SOMENTE JSON válido com title, type (game ou app) e files (array de objetos path/content).",
-    "Retorne o conjunto COMPLETO de arquivos finais. Os únicos caminhos permitidos são index.html, style.css e script.js. Preserve funcionalidades não mencionadas.",
-    "Não use bibliotecas externas, CDNs, rede, iframes, formulários que enviem dados ou acesso ao sistema de arquivos.",
-    "Mantenha o projeto autossuficiente, responsivo e em português. Limite total 60 KB. Não inclua markdown."
-  ].join(" ");
-  const response = await fetch(base + "/chat/completions", {
-    method: "POST",
-    headers: { authorization: "Bearer " + process.env.AI_API_KEY, "content-type": "application/json" },
-    body: JSON.stringify({ model: process.env.AI_MODEL, temperature: 0.25, response_format: { type: "json_object" }, messages: [
-      { role: "system", content: system },
-      { role: "user", content: "Pedido de alteração:\\n" + prompt + "\\n\\nProjeto atual:\\n" + JSON.stringify({ title: project.title, type: project.type, files: project.content }) }
-    ] }),
-    signal: AbortSignal.timeout(60000)
-  });
-  if (!response.ok) return { status: 502, body: { error: "AI_MODIFICATION_FAILED", message: "O provedor não conseguiu modificar o projeto (HTTP " + response.status + ")." } };
-  const data = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (typeof content !== "string") throw new Error("Resposta vazia do provedor.");
-  const generated = parseModelJson(content);
-  if (!Array.isArray(generated.files)) throw new Error("O modelo não retornou os arquivos finais.");
-  const seen = new Set(), files = [];
-  let total = 0;
-  for (const item of generated.files) {
-    if (!item || !ALLOWED_FILES.has(item.path) || seen.has(item.path) || typeof item.content !== "string") continue;
-    const size = Buffer.byteLength(item.content, "utf8");
-    total += size;
-    if (size > 40000 || total > 60000) throw new Error("Os arquivos modificados excederam o limite permitido.");
-    seen.add(item.path); files.push({ path: item.path, content: item.content });
-  }
-  if (!seen.has("index.html") || !files.length) throw new Error("A alteração precisa retornar um index.html válido.");
-  return { status: 200, body: { title: typeof generated.title === "string" ? generated.title.trim().slice(0,90) : project.title, type: generated.type === "game" ? "game" : "app", files } };
+async function generateModification(project, prompt, preferredProvider) {
+  const system = ["Você é o agente de manutenção do IA Games. Modifique o projeto web existente conforme o pedido.","Retorne SOMENTE JSON válido com title, type (game ou app) e files (array de objetos path/content).","Retorne o conjunto COMPLETO de arquivos finais. Os únicos caminhos permitidos são index.html, style.css e script.js. Preserve funcionalidades não mencionadas.","Não use bibliotecas externas, CDNs, rede, iframes, formulários que enviem dados ou acesso ao sistema de arquivos.","Mantenha o projeto autossuficiente, responsivo e em português. Limite total 60 KB. Não inclua markdown."].join(" ");
+  const result=await callAI([{role:"system",content:system},{role:"user",content:"Pedido de alteração:\n"+prompt+"\n\nProjeto atual:\n"+JSON.stringify({title:project.title,type:project.type,files:project.content})}],{temperature:0.25,timeout:60000},preferredProvider);
+  if(result.error)return {status:result.error.status,body:{error:result.error.code,message:result.error.message,failures:result.error.failures}};
+  const generated=parseModelJson(result.content);if(!Array.isArray(generated.files))throw new Error("O modelo não retornou os arquivos finais.");
+  const seen=new Set(),files=[];let total=0;
+  for(const item of generated.files){if(!item||!ALLOWED_FILES.has(item.path)||seen.has(item.path)||typeof item.content!=="string")continue;const size=Buffer.byteLength(item.content,"utf8");total+=size;if(size>40000||total>60000)throw new Error("Os arquivos modificados excederam o limite permitido.");seen.add(item.path);files.push({path:item.path,content:item.content});}
+  if(!seen.has("index.html")||!files.length)throw new Error("A alteração precisa retornar um index.html válido.");
+  return {status:200,body:{title:typeof generated.title==="string"?generated.title.trim().slice(0,90):project.title,type:generated.type==="game"?"game":"app",files,provider:result.provider,fallbackAttempts:result.failures}};
 }
 async function readVersion(projectId, versionId) {
   if (!/^[0-9a-f-]{36}$/i.test(projectId) || !/^v[0-9]+-[0-9a-f]{8}$/i.test(versionId)) return null;
@@ -226,9 +196,14 @@ async function applyProjectFiles(projectId, files) {
 const server = createServer(async (req, res) => {
   const url = new URL(req.url || "/", "http://localhost");
   if (req.method === "GET" && url.pathname === "/api/health") {
-    return json(res, 200, { ok: true, aiConfigured: Boolean(process.env.AI_API_KEY && process.env.AI_MODEL) });
+    return json(res, 200, { ok: true, aiConfigured: configuredProviders().length > 0, providers: configuredProviders().map(({ id, label, model }) => ({ id, label, model })), primaryProvider: process.env.AI_PROVIDER || "openai" });
   }
 
+
+  if (req.method === "GET" && url.pathname === "/api/providers") {
+    const configured = configuredProviders().map(({ id, label, model }) => ({ id, label, model }));
+    return json(res, 200, { providers: configured, primary: process.env.AI_PROVIDER || "openai", fallbackOrder: providerOrder() });
+  }
 
   const projectAction = url.pathname.match(/^\/api\/projects\/([0-9a-f-]{36})\/(modify|versions|rollback)$/i);
   if (projectAction && req.method === "GET" && projectAction[2] === "versions") {
@@ -244,7 +219,7 @@ const server = createServer(async (req, res) => {
       const body = await bodyJson(req);
       const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
       if (prompt.length < 8 || prompt.length > 5000) return json(res, 400, { error: "INVALID_PROMPT", message: "A alteração deve ter entre 8 e 5.000 caracteres." });
-      const changed = await generateModification(project, prompt);
+      const changed = await generateModification(project, prompt, typeof body.provider === "string" ? body.provider : undefined);
       if (changed.status !== 200) return json(res, changed.status, changed.body);
       const directory = join(DATA_DIR, project.id);
       const metadata = JSON.parse(await readFile(join(directory, "project.json"), "utf8"));
@@ -253,7 +228,7 @@ const server = createServer(async (req, res) => {
       const nextFiles = changed.body.files.map(file => file.path);
       const updated = { ...metadata, title: changed.body.title, type: changed.body.type, files: nextFiles, updatedAt: new Date().toISOString(), versions: [...(metadata.versions || []), snapshot] };
       await writeFile(join(directory, "project.json"), JSON.stringify(updated, null, 2));
-      return json(res, 200, { project: await getProject(project.id), version: snapshot });
+      return json(res, 200, { project: await getProject(project.id), version: snapshot, provider: changed.body.provider, fallbackAttempts: changed.body.fallbackAttempts });
     } catch (error) {
       if (error.name === "TimeoutError" || error.name === "AbortError") return json(res, 504, { error: "AI_TIMEOUT", message: "A alteração demorou demais. Tente novamente." });
       return json(res, 502, { error: "PROJECT_MODIFY_FAILED", message: "Não foi possível modificar o projeto: " + error.message });
@@ -290,10 +265,10 @@ const server = createServer(async (req, res) => {
       const body = await bodyJson(req);
       const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
       if (prompt.length < 8 || prompt.length > 5000) return json(res, 400, { error: "INVALID_PROMPT", message: "O briefing deve ter entre 8 e 5.000 caracteres." });
-      const generated = await generateProject(prompt);
+      const generated = await generateProject(prompt, typeof body.provider === "string" ? body.provider : undefined);
       if (generated.status !== 200) return json(res, generated.status, generated.body);
       const project = await saveProject(generated.body);
-      return json(res, 201, { project });
+      return json(res, 201, { project, provider: generated.body.provider, fallbackAttempts: generated.body.fallbackAttempts });
     } catch (error) {
       if (error.name === "TimeoutError" || error.name === "AbortError") return json(res, 504, { error: "AI_TIMEOUT", message: "A geração demorou demais. Tente novamente." });
       return json(res, 502, { error: "PROJECT_CREATE_FAILED", message: "Não foi possível criar o projeto: " + error.message });
@@ -304,7 +279,7 @@ const server = createServer(async (req, res) => {
       const body = await bodyJson(req);
       const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
       if (prompt.length < 8 || prompt.length > 5000) return json(res, 400, { error: "INVALID_PROMPT", message: "O briefing deve ter entre 8 e 5.000 caracteres." });
-      const result = await planProject(prompt);
+      const result = await planProject(prompt, typeof body.provider === "string" ? body.provider : undefined);
       return json(res, result.status, result.body);
     } catch (error) {
       if (error.name === "TimeoutError" || error.name === "AbortError") return json(res, 504, { error: "AI_TIMEOUT", message: "O modelo demorou demais para responder. Tente novamente." });
