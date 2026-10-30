@@ -49,6 +49,11 @@ try {
   });
   assert.equal(unconfigured.status, 503);
 
+  const versionsWithoutProject = await fetch(origin + "/api/projects/00000000-0000-0000-0000-000000000000/versions");
+  assert.equal(versionsWithoutProject.status, 404);
+  const modifyWithoutProject = await fetch(origin + "/api/projects/00000000-0000-0000-0000-000000000000/modify", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "Mude o título do projeto." }) });
+  assert.equal(modifyWithoutProject.status, 404);
+
   const hidden = await fetch(origin + "/.env");
   assert.equal(hidden.status, 404);
   const data = await fetch(origin + "/.iagames-data/projects");
