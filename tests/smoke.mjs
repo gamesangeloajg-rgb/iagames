@@ -1,7 +1,6 @@
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import { Script } from "node:vm";
 
 const port = 4317 + Math.floor(Math.random() * 1000);
