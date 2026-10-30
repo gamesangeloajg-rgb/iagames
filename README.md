@@ -16,7 +16,7 @@ Servidor Node.js sem dependências externas, planejamento por IA, geração de p
 - `GET /api/health`: estado do servidor e configuração da IA.
 - `POST /api/projects/plan`: cria plano técnico a partir de `{"prompt":"..." }`.
 - `POST /api/projects/create`: gera um projeto frontend real, salva seus arquivos e retorna o conteúdo para preview.
-- `GET /api/projects`: lista os projetos salvos.
+- `GET /api/projects`: lista os projetos salvos.\n- `GET /api/projects/:id`: recupera um projeto salvo para reabertura.
 
 ### Geração e isolamento
 
