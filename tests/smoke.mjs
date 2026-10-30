@@ -64,7 +64,24 @@ try {
   const missingProject = await fetch(origin + "/api/projects/00000000-0000-0000-0000-000000000000");
   assert.equal(missingProject.status, 404);
 
-  console.log("Smoke tests passed: health, static UI, project listing, prompt validation, missing AI config and private-file protection.");
+  const providerPort = port + 1001;
+  const providerServer = spawn(process.execPath, ["server.mjs"], {
+    env: { ...process.env, PORT: String(providerPort), HOST: "127.0.0.1", AI_API_KEY: "", AI_MODEL: "", OPENAI_API_KEY: "test-openai-key", GROQ_API_KEY: "test-groq-key" },
+    stdio: "ignore"
+  });
+  try {
+    let providerReady = false;
+    for (let attempt = 0; attempt < 40; attempt++) {
+      try { if ((await fetch("http://127.0.0.1:" + providerPort + "/api/health")).ok) { providerReady = true; break; } } catch {}
+      await delay(150);
+    }
+    assert.equal(providerReady, true, "provider-configured server starts");
+    const providerData = await (await fetch("http://127.0.0.1:" + providerPort + "/api/providers")).json();
+    assert.deepEqual(providerData.providers.map(item => item.id).sort(), ["groq", "openai"]);
+    assert.equal(JSON.stringify(providerData).includes("test-openai-key"), false, "provider API never exposes API keys");
+  } finally { providerServer.kill("SIGTERM"); }
+
+  console.log("Smoke tests passed: health, UI, projects, validation, private-file protection and multi-provider discovery.");
 } finally {
   child.kill("SIGTERM");
 }
