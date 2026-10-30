@@ -133,6 +133,19 @@ async function saveProject(project) {
   await writeFile(join(directory, "project.json"), JSON.stringify(metadata, null, 2), { encoding: "utf8", flag: "wx" });
   return { ...metadata, content: project.files };
 }
+async function getProject(id) {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  const directory = join(DATA_DIR, id);
+  try {
+    const metadata = JSON.parse(await readFile(join(directory, "project.json"), "utf8"));
+    const content = [];
+    for (const path of metadata.files) {
+      if (!ALLOWED_FILES.has(path)) continue;
+      content.push({ path, content: await readFile(join(directory, path), "utf8") });
+    }
+    return { ...metadata, content };
+  } catch { return null; }
+}
 async function listProjects() {
   await mkdir(DATA_DIR, { recursive: true });
   const entries = await readdir(DATA_DIR, { withFileTypes: true });
@@ -152,6 +165,11 @@ async function listProjects() {
     return json(res, 200, { ok: true, aiConfigured: Boolean(process.env.AI_API_KEY && process.env.AI_MODEL) });
   }
 
+  const projectMatch = url.pathname.match(/^\/api\/projects\/([0-9a-f-]{36})$/i);
+  if (req.method === "GET" && projectMatch) {
+    const project = await getProject(projectMatch[1]);
+    return project ? json(res, 200, { project }) : json(res, 404, { error: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
+  }
   if (req.method === "GET" && url.pathname === "/api/projects") {
     try { return json(res, 200, { projects: await listProjects() }); }
     catch { return json(res, 500, { error: "PROJECT_LIST_FAILED", message: "Não foi possível carregar os projetos." }); }
@@ -183,16 +201,11 @@ async function listProjects() {
     }
   }
   if (req.method !== "GET" && req.method !== "HEAD") return json(res, 405, { error: "METHOD_NOT_ALLOWED", message: "Método não permitido." });
-  let pathname;
-  try { pathname = decodeURIComponent(url.pathname); } catch { return json(res, 400, { error: "BAD_PATH", message: "Caminho inválido." }); }
-  const relative = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
-  const target = resolve(ROOT, relative);
-  if (!target.startsWith(ROOT + sep)) return json(res, 403, { error: "FORBIDDEN", message: "Caminho não permitido." });
+  if (url.pathname !== "/" && url.pathname !== "/index.html") return json(res, 404, { error: "NOT_FOUND", message: "Rota não encontrada." });
   try {
-    const data = await readFile(target);
-    const types = { ".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml" };
-    res.writeHead(200, { "content-type": types[extname(target)] || "application/octet-stream", "x-content-type-options": "nosniff" });
+    const data = await readFile(join(ROOT, "index.html"));
+    res.writeHead(200, { "content-type": "text/html; charset=utf-8", "x-content-type-options": "nosniff", "cache-control": "no-cache" });
     res.end(req.method === "HEAD" ? undefined : data);
-  } catch { json(res, 404, { error: "NOT_FOUND", message: "Arquivo não encontrado." }); }
+  } catch { json(res, 404, { error: "NOT_FOUND", message: "Interface não encontrada." }); }
 });
 server.listen(PORT, HOST, () => console.log("IA Games disponível em http://" + HOST + ":" + PORT));
