@@ -164,7 +164,7 @@ async function listProjects() {
 
 async function generateModification(project, prompt) {
   if (!process.env.AI_API_KEY || !process.env.AI_MODEL) return { status: 503, body: { error: "AI_NOT_CONFIGURED", message: "Configure AI_API_KEY e AI_MODEL no servidor." } };
-  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\\/+$/, "");
+  const base = (process.env.AI_BASE_URL || "https://api.openai.com/v1").replace(/\/+$/, "");
   const system = [
     "Você é o agente de manutenção do IA Games. Modifique o projeto web existente conforme o pedido.",
     "Retorne SOMENTE JSON válido com title, type (game ou app) e files (array de objetos path/content).",
@@ -230,7 +230,7 @@ const server = createServer(async (req, res) => {
   }
 
 
-  const projectAction = url.pathname.match(/^\\/api\\/projects\\/([0-9a-f-]{36})\\/(modify|versions|rollback)$/i);
+  const projectAction = url.pathname.match(/^\/api\/projects\/([0-9a-f-]{36})\/(modify|versions|rollback)$/i);
   if (projectAction && req.method === "GET" && projectAction[2] === "versions") {
     const project = await getProject(projectAction[1]);
     if (!project) return json(res, 404, { error: "PROJECT_NOT_FOUND", message: "Projeto não encontrado." });
