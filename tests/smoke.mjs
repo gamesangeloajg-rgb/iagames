@@ -1,6 +1,8 @@
 import { spawn } from "node:child_process";
 import { setTimeout as delay } from "node:timers/promises";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { Script } from "node:vm";
 
 const port = 4317 + Math.floor(Math.random() * 1000);
 const origin = `http://127.0.0.1:${port}`;
@@ -26,7 +28,12 @@ try {
 
   const home = await fetch(origin + "/");
   assert.equal(home.status, 200);
-  assert.match(await home.text(), /IA Games/);
+  const html = await home.text();
+  assert.match(html, /IA Games/);
+  const scriptStart = html.indexOf("<script>");
+  const scriptEnd = html.lastIndexOf("</script>");
+  assert.ok(scriptStart >= 0 && scriptEnd > scriptStart, "studio page contains its client script");
+  new Script(html.slice(scriptStart + 8, scriptEnd), { filename: "index.html" });
 
   const projects = await (await fetch(origin + "/api/projects")).json();
   assert.ok(Array.isArray(projects.projects));
@@ -47,6 +54,8 @@ try {
   assert.equal(hidden.status, 404);
   const data = await fetch(origin + "/.iagames-data/projects");
   assert.equal(data.status, 404);
+  const missingProject = await fetch(origin + "/api/projects/00000000-0000-0000-0000-000000000000");
+  assert.equal(missingProject.status, 404);
 
   console.log("Smoke tests passed: health, static UI, project listing, prompt validation, missing AI config and private-file protection.");
 } finally {
