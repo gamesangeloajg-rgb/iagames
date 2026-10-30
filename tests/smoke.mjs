@@ -23,6 +23,9 @@ try {
   const health = await (await fetch(origin + "/api/health")).json();
   assert.equal(health.ok, true);
   assert.equal(health.aiConfigured, false);
+  assert.deepEqual(health.providers, []);
+  const providerList = await (await fetch(origin + "/api/providers")).json();
+  assert.deepEqual(providerList.providers, []);
   assert.equal(Object.hasOwn(health, "apiKey"), false);
 
   const home = await fetch(origin + "/");
