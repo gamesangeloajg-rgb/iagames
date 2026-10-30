@@ -8,12 +8,14 @@ Servidor Node.js sem dependências externas, planejamento por IA, geração de p
 
 - Node.js 20 ou superior.
 - Copie `.env.example` para `.env`.
-- Configure `AI_API_KEY` e `AI_MODEL`; ajuste `AI_BASE_URL` se necessário.
+- Configure uma ou mais chaves de provedores no `.env`; veja a tabela de provedores abaixo.
+- Escolha `AI_PROVIDER` e a ordem de contingência em `AI_FALLBACK_PROVIDERS`.
 - Execute `npm start` e abra http://127.0.0.1:3000.
 
 ### Endpoints
 
-- `GET /api/health`: estado do servidor e configuração da IA.
+- `GET /api/health`: estado do servidor e provedores configurados.
+- `GET /api/providers`: lista provedores configurados, modelo e ordem de fallback.
 - `POST /api/projects/plan`: cria plano técnico a partir de `{"prompt":"..." }`.
 - `POST /api/projects/create`: gera um projeto frontend real, salva seus arquivos e retorna o conteúdo para preview.
 - `GET /api/projects`: lista os projetos salvos.
@@ -21,6 +23,10 @@ Servidor Node.js sem dependências externas, planejamento por IA, geração de p
 - `POST /api/projects/:id/modify`: altera um projeto existente preservando os arquivos permitidos.
 - `GET /api/projects/:id/versions`: lista snapshots anteriores.
 - `POST /api/projects/:id/rollback`: restaura um snapshot com `{"versionId":"..."}`.
+
+### Provedores de IA e contingência
+
+O motor aceita endpoints compatíveis com Chat Completions: OpenAI, Groq, OpenRouter, Together AI, Google Gemini e DeepSeek. Cada provedor usa sua própria chave e modelo. Configure duas ou mais chaves para ativar fallback automático; a seleção primária é `AI_PROVIDER` e a ordem é `AI_FALLBACK_PROVIDERS`. As chaves nunca são enviadas ao navegador. `GET /api/providers` lista somente provedores configurados, sem expor credenciais. Criação, planejamento e modificação aceitam um campo opcional `provider` para priorizar um provedor naquela solicitação.
 
 ### Geração e isolamento
 
